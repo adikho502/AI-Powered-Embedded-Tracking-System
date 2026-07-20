@@ -1,0 +1,167 @@
+# ============================================================
+#  AI-Embedded Tracking System - PYTHON SIDE (main.py)
+#  [EXAMPLE] = came from the object-detection example
+#  everything else = mine
+# ============================================================
+
+# [EXAMPLE] get the tools
+from arduino.app_utils import App, Bridge
+from arduino.app_bricks.web_ui import WebUI
+from arduino.app_bricks.video_objectdetection import VideoObjectDetection
+from datetime import datetime, UTC
+
+# [EXAMPLE] start the dashboard + AI detector
+ui = WebUI()
+detection_stream = VideoObjectDetection(confidence=0.7, debounce_sec=0.0)
+
+# [EXAMPLE] lets the browser slider change the confidence live
+ui.on_message("override_th", lambda sid, threshold: detection_stream.override_threshold(threshold))
+
+# --- my calibration ---
+LaserCenterX = 300
+LaserCenterY = 240
+
+BottomServoMin, BottomServoMid, BottomServoMax = 375, 1275, 2175
+TopServoMin,    TopServoMid,    TopServoMax    = 500, 1275, 2050
+
+# --- tuning ---
+PUSH_STRENGTH  = 0.1
+BRAKE_STRENGTH = 0.1
+DEAD_ZONE = 40
+MIN_BOX_AREA = 10000
+
+BOTTOM_SIGN = -1
+TOP_SIGN    = -1
+
+# --- where the servos are right now (starts centered, then changes as it tracks) ---
+BottomServoPos = BottomServoMid
+TopServoPos    = TopServoMid
+
+# --- remember last frame's error (the brake needs it) ---
+LastErrorX = 0
+LastErrorY = 0
+
+# --- MY FUNCTIONS ---
+def clamp(val, lo, hi):  # clamps values between calibrated limits
+    if val < lo:
+        return lo
+    elif val > hi:
+        return hi
+    else:
+        return val
+
+def box_area(box):  # box area to follow the largest person box
+    if not box:
+        return 0
+    else:
+        x_min, y_min, x_max, y_max = box
+        xlength = x_max - x_min
+        ylength = y_max - y_min
+        area = xlength * ylength
+        return area
+
+def centroid(box):  # center of box
+    if not box:
+        return (0, 0)
+    else:
+        x_min, y_min, x_max, y_max = box
+        xavg = (x_min + x_max) / 2
+        yavg = (y_min + y_max) / 2
+        return (xavg, yavg)
+
+def error(centroid, LaserCenterX, LaserCenterY):  # error off the laser center
+    xcen, ycen = centroid
+    x_error = xcen - LaserCenterX
+    y_error = ycen - LaserCenterY
+    return (x_error, y_error)
+
+class KalmanFilter:
+    def __init__(self, camTrust = 0.8, velTrust = 0.2): # We will have 2 filters, Kx and Ky (Kalaman X and Y)
+                                                        # __init__ sets up what the filters start with, position, camera positon trust and velocity teust
+        self.pos = None
+        self.vel = 0.0
+        self.camTrust = camTrust
+        self.velTrust = velTrust
+   
+    def update(self, measurement):
+        if self.pos is None:
+            self.pos = measurement
+            return self.pos, self.vel
+        else:
+            predicted_pos = self.pos + self.vel
+            residual = measurement - predicted_pos
+            new_pos = predicted_pos + (residual * self.camTrust)
+            new_vel = self.vel + (residual * self.velTrust)
+
+            self.pos = new_pos
+            self.vel = new_vel
+            return new_pos, new_vel
+       
+KalmanFilterX = KalmanFilter()
+KalmanFilterY = KalmanFilter()
+
+# [EXAMPLE] this function runs every frame the camera grabs
+# (the example gave me this shell - I filled it with my tracking logic)
+def on_detections(detections: dict):
+    global BottomServoPos, TopServoPos, LastErrorX, LastErrorY
+
+    # [EXAMPLE-ish] find the person, pick the BIGGEST box, ignore phantoms
+    person = None
+    if "person" in detections and detections["person"]:
+        biggest = max(detections["person"], key=lambda p: box_area(p.get("bounding_box_xyxy")))
+        if box_area(biggest.get("bounding_box_xyxy")) >= MIN_BOX_AREA:
+            person = biggest
+
+    # (mine) no person -> recenter servos to idle, then stop
+    if person is None:
+        BottomServoPos = BottomServoMid
+        TopServoPos    = TopServoMid
+        Bridge.notify("move", int(BottomServoPos), int(TopServoPos))
+        return
+
+    # (mine) get the box, its centroid, and the error
+    box = person.get("bounding_box_xyxy")
+    center = centroid(box)
+    rawCenx, rawCeny = center
+    filterPosx, filterVelx = KalmanFilterX.update(rawCenx)
+    filterPosy, filterVely = KalmanFilterY.update(rawCeny)
+
+    error_x = filterPosx - LaserCenterX
+    error_y = filterPosy - LaserCenterY
+
+    # (mine) dead zone: if close enough, treat as zero (no twitching)
+    if abs(error_x) < DEAD_ZONE:
+        error_x = 0
+    if abs(error_y) < DEAD_ZONE:
+        error_y = 0
+
+    # ---- PD CONTROL - X axis (bottom servo) ----
+    error_change_x = error_x - LastErrorX          # A: how fast error is changing
+    LastErrorX = error_x                           # B: remember for next frame
+    movement_x = PUSH_STRENGTH * error_x - BRAKE_STRENGTH * error_change_x   # C: push - brake
+    BottomServoPos = BottomServoPos + BOTTOM_SIGN * movement_x               # D: nudge the servo
+    BottomServoPos = clamp(BottomServoPos, BottomServoMin, BottomServoMax)   # E: keep it safe
+
+    # ---- PD CONTROL - Y axis (top servo) ----
+    error_change_y = error_y - LastErrorY
+    LastErrorY = error_y
+    movement_y = PUSH_STRENGTH * error_y - BRAKE_STRENGTH * error_change_y
+    TopServoPos = TopServoPos + TOP_SIGN * movement_y
+    TopServoPos = clamp(TopServoPos, TopServoMin, TopServoMax)
+
+    # (mine) send the positions to the servos
+    Bridge.notify("move", int(BottomServoPos), int(TopServoPos))
+
+    # [EXAMPLE] send the detection to the browser dashboard
+    ui.send_message("detection", message={
+        "content": "person",
+        "confidence": person.get("confidence"),
+        "timestamp": datetime.now(UTC).isoformat()
+    })
+
+    # (mine) print so I can see what it's doing
+    print(f"error ({error_x:.0f}, {error_y:.0f})  ->  bottom {int(BottomServoPos)}  top {int(TopServoPos)}")
+
+# [EXAMPLE] wire the function to the detector and start everything
+detection_stream.on_detect_all(on_detections)
+App.run()

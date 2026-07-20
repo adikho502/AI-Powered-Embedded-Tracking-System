@@ -3,6 +3,7 @@
 #  [EXAMPLE] = came from the object-detection example
 #  everything else = mine
 # ============================================================
+# Andrew Dikho
 
 # [EXAMPLE] get the tools
 from arduino.app_utils import App, Bridge

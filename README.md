@@ -71,7 +71,7 @@ error_y = centroid_y - LaserCenterY
 
 The servos are driven by microsecond pulse widths. The width sets the position. It maps to an angle but it's not a clean microseconds-equals-degrees conversion, and every servo's range is a little different, so I couldn't just use the standard values.
 
-Normally you'd use the Arduino Servo library, but it doesn't compile for this board's STM32 target. So I generate the pulses manually: set the pin HIGH, wait N microseconds, set it LOW. That meant finding the limits myself by sweeping the pulse width and watching where each servo physically stopped.
+Normally you'd use the Arduino Servo library, but it doesn't compile for this board.
 
 | Servo | Min | Center | Max |
 |---|---|---|---|
@@ -137,25 +137,11 @@ One thing worth knowing: the code sends absolute positions, not directions. The 
 
 ## Challenges
 
-**Runaway feedback loop.** The camera is mounted on the gimbal, so moving the servo moves the camera too. With the feedback sign backwards, every correction made the error grow instead of shrink and the gimbal drove itself into its end stop. I found it by logging the error every frame and watching it swing plus or minus 350 pixels while I stood still, which is the signature of positive feedback. The fix was working out the sign convention: the direction of the error subtraction and the servo sign constant together set the loop polarity, and you have to flip exactly one of them.
-
-**Detection rate is a hardware ceiling.** The AI only runs 10 to 15 times a second. That's not a software problem. The UNO Q's processor is a small low-power embedded chip, roughly Raspberry Pi 3 class, with no dedicated AI accelerator, and running a full object-detection network takes 66 to 100 ms per frame. Meanwhile the MCU can update the servos at 66 to 200 Hz. Since new targets only arrived 10 to 15 times a second, the servo would jump to each one and pause, which showed up as visible stutter.
-
-**Two smoothing layers fighting each other.** Early on both the MCU and the Python side were smoothing. Stacked together they made the response sluggish and then it would overshoot anyway. Fixed by keeping all the control logic in Python and letting the MCU just execute.
+**Detection rate is a hardware ceiling.** The AI only runs 10 to 15 times a second. That's not a software problem. The UNO Q's processor is a small low-power chip, and running a full object-detection network takes 66 to 100 ms per frame. Meanwhile the MCU can update the servos at 66 to 200 Hz. Since new targets only arrived 10 to 15 times a second, the servo would jump to each one and pause, which showed up as visible stutter.
 
 **Stutter fix.** The MCU doesn't snap to each new target. It glides toward it a fraction each fast loop, filling the gaps between detections so the slow updates blend into continuous motion. The MCU stays fast, it just interpolates between the slow targets. That plus the Kalman filter predicting through the gaps is what made the tracking smooth despite the slow detection rate.
 
 **False detections.** Furniture would sometimes get classified as a person and the laser would jump to it. Raised the confidence threshold and only track the largest box above a minimum area.
-
----
-
-## Improvements
-
-- **Lighter model.** A person-only model would run faster than the general object detector and raise the frame rate, which is the main limit on smoothness.
-- **Offload the detection.** The real bottleneck is the detection rate, not the MCU. Running the AI on a processor with actual AI acceleration would raise the detection rate itself.
-- **Velocity lead.** The filter already estimates velocity, so it could aim where the target is going instead of where it was, which cancels some of the latency.
-- **Distance-based gains.** The pixel-to-angle relationship changes with range, so scheduling the gain against estimated distance would keep the response consistent as the target moves closer or further.
-- **Servos with encoders.** These servos give no position feedback, so the loop closes on the commanded angle, not the actual one.
 
 ---
 
@@ -172,7 +158,7 @@ DEAD_ZONE      = 40
 MIN_BOX_AREA   = 10000
 camTrust       = 0.8
 velTrust       = 0.2
-SMOOTH (MCU)   = 0.15
+SMOOTH (MCU)   = 0.02
 ```
 
 Your laser center and servo limits will be different. Calibrate those first or nothing will land where you expect.

@@ -1,0 +1,58 @@
+// ============================================================
+//  AI-Powered Embedded Tracking System - MCU SIDE (sketch.ino)
+//  Python sends targets SLOWLY (detection rate). The MCU runs
+//  FAST and glides toward the target between updates - turning
+//  "step-pause-step" into smooth continuous motion.
+// ============================================================
+// Andrew Dikho
+#include <Arduino_RouterBridge.h>
+
+int bottomServoPin = 10;
+int topServoPin    = 9;
+int laserPin       = 7;
+
+// where the servos ARE right now (float so it can glide in small steps)
+float bottomPos = 1275;
+float topPos    = 1275;
+
+// where Python WANTS them (the target - updates slowly)
+volatile int bottomTarget = 1275;
+volatile int topTarget     = 1275;
+
+// glide toward the target each fast loop.
+// lower = smoother but more lag, higher = snappier but steppier
+float SMOOTH = 0.15;
+
+// flash one servo pulse - the "us" length sets the position
+void writeServo(int pin, int us) {
+  digitalWrite(pin, HIGH);
+  delayMicroseconds(us);
+  digitalWrite(pin, LOW);
+}
+
+// Python calls this to set a new target (runs slowly, on each detection)
+void moveServos(int newBottom, int newTop) {
+  bottomTarget = newBottom;
+  topTarget    = newTop;
+}
+
+void setup() {
+  pinMode(bottomServoPin, OUTPUT);
+  pinMode(topServoPin, OUTPUT);
+  pinMode(laserPin, OUTPUT);
+  digitalWrite(laserPin, HIGH);   // laser on
+  Bridge.begin();
+  Bridge.provide("move", moveServos);   // let Python call "move"
+}
+
+void loop() {
+  // glide a fraction of the way toward the target every fast loop -
+  // fills the gaps between Python's slow updates so motion is continuous
+  bottomPos = bottomPos + (bottomTarget - bottomPos) * SMOOTH;
+  topPos    = topPos    + (topTarget    - topPos)    * SMOOTH;
+
+  writeServo(bottomServoPin, (int)bottomPos);
+  writeServo(topServoPin, (int)topPos);
+
+  delay(5);   // fast refresh - runs way faster than detections arrive
+}
